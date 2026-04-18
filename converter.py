@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import json, base64, urllib.parse, os, sys, argparse, re
+import json, base64, urllib.parse, os, sys, argparse
 
 def get_tag(url):
     return urllib.parse.unquote(url.split('#')[-1]) if '#' in url else "unknown_node"
@@ -77,17 +77,13 @@ def parse_hysteria2_for_xray(url):
     auth = urllib.parse.unquote(parsed.username or '')
     query = dict(urllib.parse.parse_qsl(parsed.query))
     sni = query.get('sni', host)
-    obfs = query.get('obfs', '')
-    obfs_password = query.get('obfs-password', '')
     
-    out = {
+    return {
         "tag": tag,
-        "protocol": "hysteria",  # Важно: НЕ "hysteria2"
+        "protocol": "hysteria",
         "settings": {
-            "version": 2,  # Важно: указываем версию 2
-            "address": host,
-            "port": port,
-            "auth": auth
+            "version": 2,
+            "servers": [{"address": host, "port": port, "password": auth}]
         },
         "streamSettings": {
             "network": "hysteria",
@@ -95,18 +91,11 @@ def parse_hysteria2_for_xray(url):
             "tlsSettings": {"serverName": sni, "fingerprint": "chrome", "alpn": ["h3"]},
             "hysteriaSettings": {
                 "version": 2,
-                "auth": auth,
                 "up": "100 mbps",
                 "down": "100 mbps"
             }
         }
     }
-    # Поддержка Salamander obfs через finalmask (правильный формат для Xray) [[10]]
-    if obfs == 'salamander' and obfs_password:
-        out["streamSettings"]["finalmask"] = {
-            "udp": [{"type": "salamander", "settings": {"password": obfs_password}}]
-        }
-    return out
 
 def main():
     parser = argparse.ArgumentParser(description="Xeovo → Xray config converter")
@@ -132,7 +121,7 @@ def main():
         if 'cn' in tag or 'cn' in host:
             print(f"⏭️ Пропущен CN: {line}"); continue
         if line.startswith('ss://'):
-            continue  # Shadowsocks
+            continue
         
         try:
             if line.startswith('trojan://'):
@@ -142,7 +131,6 @@ def main():
             elif line.startswith('vmess://'):
                 outbounds.append(parse_vmess(line))
             elif line.startswith('hysteria2://'):
-                # Теперь поддерживаем Hysteria2 для Xray-core
                 outbounds.append(parse_hysteria2_for_xray(line))
                 print(f"✅ Hysteria2 добавлен: {get_tag(line)}")
             else:
@@ -153,7 +141,7 @@ def main():
     
     # Системные outbounds
     outbounds.append({"tag": "direct", "protocol": "freedom", "settings": {}, 
-                      "streamSettings": {"sockopt": {"domainStrategy": "UseIPv4", "tcpFastOpen": True}}})
+                      "streamSettings": {"sockopt": {"domainStrategy": "UseIPv4"}}})
     outbounds.append({"tag": "block", "protocol": "blackhole", "settings": {"response": {"type": "http"}}})
     
     config = {
@@ -168,7 +156,7 @@ def main():
         "routing": {
             "domainStrategy": "UseIPv4",
             "rules": [
-                {"type": "field", "ip": ["::/0"], "outboundTag": "block"},  # Блок всех IPv6
+                {"type": "field", "ip": ["::/0"], "outboundTag": "block"},
                 {"type": "field", "ip": ["geoip:private"], "outboundTag": "block"},
                 {"type": "field", "domain": ["geosite:category-ads-all"], "outboundTag": "block"},
                 {"type": "field", "domain": ["domain:local", "regexp:\\.local$"], "outboundTag": "direct"},
