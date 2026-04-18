@@ -277,4 +277,40 @@ def main():
     config = {
         "log": {"loglevel": "debug", "access": "", "error": ""},
         "inbounds": [
-            {"tag": "socks-inbound", "port": 20808,
+            {"tag": "socks-inbound", "port": 20808, "protocol": "socks",
+             "settings": {"auth": "noauth", "udp": True, "ip": "127.0.0.1"},
+             "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"], "routeOnly": True}},
+            {"tag": "http-inbound", "port": 20809, "protocol": "http", "settings": {"allowTransparent": False}}
+        ],
+        "outbounds": final_outbounds,
+        "routing": {
+            "domainStrategy": "UseIPv4",
+            "rules": [
+                {"type": "field", "ip": ["::/0"], "outboundTag": "block"},
+                {"type": "field", "ip": ["geoip:private"], "outboundTag": "block"},
+                {"type": "field", "domain": ["geosite:category-ads-all"], "outboundTag": "block"},
+                {"type": "field", "domain": ["domain:local", r"regexp:\.local$"], "outboundTag": "direct"},
+                {"type": "field", "inboundTag": ["socks-inbound", "http-inbound"], "balancerTag": "auto-balancer"}
+            ],
+            "balancers": [{
+                "tag": "auto-balancer",
+                "selector": selector_tags,  # ✅ Теперь здесь гарантированно правильные теги
+                "strategy": {"type": "leastPing"}
+            }]
+        },
+        "policy": {"levels": {"0": {"handshake": 8, "connIdle": 300, "uplinkOnly": 5, "downlinkOnly": 10, "bufferSize": 4096}}}
+    }
+
+    out_dir = os.path.dirname(args.output)
+    if out_dir and not os.path.exists(out_dir):
+        os.makedirs(out_dir, exist_ok=True)
+
+    with open(args.output, 'w', encoding='utf-8') as f:
+        json.dump(config, f, indent=2, ensure_ascii=False)
+    
+    print(f"\n✅ Конфиг создан: {args.output}")
+    print(f"📊 Рабочих узлов: {len(selector_tags)}")
+    print("💡 Запустите: xray -test -config xray_config.json && xray run -c xray_config.json")
+
+if __name__ == "__main__":
+    main()
