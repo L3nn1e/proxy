@@ -12,7 +12,6 @@ import urllib.parse
 import os
 import sys
 import argparse
-import re
 
 
 def get_tag(url: str) -> str:
@@ -20,6 +19,19 @@ def get_tag(url: str) -> str:
     if '#' in url:
         return urllib.parse.unquote(url.split('#')[-1])
     return "unknown_node"
+
+
+def make_unique_tag(base_tag: str, used_tags: set) -> str:
+    """Делает тег уникальным, добавляя суффикс при дубликатах."""
+    if base_tag not in used_tags:
+        used_tags.add(base_tag)
+        return base_tag
+    counter = 1
+    while f"{base_tag}-{counter}" in used_tags:
+        counter += 1
+    unique_tag = f"{base_tag}-{counter}"
+    used_tags.add(unique_tag)
+    return unique_tag
 
 
 def parse_trojan(url: str) -> dict:
@@ -37,7 +49,7 @@ def parse_trojan(url: str) -> dict:
     ws_host = query.get('host', host)
     
     out = {
-        "tag": tag,
+        "tag": tag,  # Будет заменён на уникальный в main()
         "protocol": "trojan",
         "settings": {
             "servers": [{
@@ -113,7 +125,6 @@ def parse_vmess(url: str) -> dict:
     """Парсит vmess:// (base64 JSON) ссылку в формат Xray outbound."""
     tag = get_tag(url)
     b64 = url.split('://')[1].strip()
-    # Исправление padding для base64
     b64 += '=' * (4 - len(b64) % 4) if len(b64) % 4 != 0 else ''
     
     data = json.loads(base64.b64decode(b64).decode('utf-8'))
@@ -158,16 +169,7 @@ def parse_vmess(url: str) -> dict:
 
 
 def parse_hysteria2_for_xray(url: str) -> dict:
-    """
-    Парсит hysteria2:// ссылку в формат Xray-core outbound.
-    
-    Ключевые моменты для Xray-core:
-    - protocol: "hysteria" (НЕ "hysteria2")
-    - network: "hysteria" (НЕ "hysteria2")
-    - settings: плоская структура {address, port, auth}, НЕ массив servers
-    - hysteriaSettings (НЕ hysteria2Settings)
-    - version: 2 указывается в settings И в hysteriaSettings
-    """
+    """Парсит hysteria2:// ссылку в формат Xray-core outbound."""
     tag = get_tag(url)
     parsed = urllib.parse.urlparse(url.split('#')[0])
     host = parsed.hostname
@@ -178,24 +180,24 @@ def parse_hysteria2_for_xray(url: str) -> dict:
     
     return {
         "tag": tag,
-        "protocol": "hysteria",  # ✅ Важно: НЕ "hysteria2"
+        "protocol": "hysteria",
         "settings": {
-            "version": 2,  # ✅ Версия протокола
-            "address": host,  # ✅ Прямо в settings, НЕ в массиве
+            "version": 2,
+            "address": host,
             "port": port,
-            "auth": auth  # ✅ auth, НЕ password
+            "auth": auth
         },
         "streamSettings": {
-            "network": "hysteria",  # ✅ Транспорт: "hysteria"
+            "network": "hysteria",
             "security": "tls",
             "tlsSettings": {
                 "serverName": sni,
                 "fingerprint": "chrome",
-                "alpn": ["h3"]  # ✅ QUIC требует h3
+                "alpn": ["h3"]
             },
-            "hysteriaSettings": {  # ✅ hysteriaSettings, НЕ hysteria2Settings
+            "hysteriaSettings": {
                 "version": 2,
-                "up": "100 mbps",  # ✅ строка с единицами
+                "up": "100 mbps",
                 "down": "100 mbps"
             }
         }
@@ -206,25 +208,14 @@ def is_cn_node(tag: str, host: str) -> bool:
     """Проверяет, является ли узел заблокированным CN-сервером."""
     tag_lower = tag.lower()
     host_lower = (host or "").lower()
-    # Проверяем явные маркеры Китая
     cn_patterns = ['cn', '-cn-', 'cn-', 'china', 'custom.li']
     return any(p in tag_lower or p in host_lower for p in cn_patterns)
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Конвертация подписки Xeovo в конфиг Xray-core"
-    )
-    parser.add_argument(
-        "-i", "--input",
-        default="xeovo-any-URL_List_All_Protocols(2).txt",
-        help="Путь к входному файлу подписки (txt)"
-    )
-    parser.add_argument(
-        "-o", "--output",
-        default="xray_config.json",
-        help="Путь к выходному файлу конфига (json)"
-    )
+    parser = argparse.ArgumentParser(description="Конвертация подписки Xeovo в конфиг Xray-core")
+    parser.add_argument("-i", "--input", default="xeovo-any-URL_List_All_Protocols(2).txt", help="Входной файл подписки")
+    parser.add_argument("-o", "--output", default="xray_config.json", help="Выходной конфиг Xray")
     args = parser.parse_args()
     
     if not os.path.exists(args.input):
@@ -234,7 +225,7 @@ def main():
     with open(args.input, 'r', encoding='utf-8') as f:
         lines = f.readlines()
     
-    outbounds, tags = [], []
+    outbounds, tags, used_tags = [], [], set()
     
     for line in lines:
         line = line.strip()
@@ -256,17 +247,22 @@ def main():
         
         try:
             if line.startswith('trojan://'):
-                outbounds.append(parse_trojan(line))
+                outbound = parse_trojan(line)
             elif line.startswith('vless://'):
-                outbounds.append(parse_vless(line))
+                outbound = parse_vless(line)
             elif line.startswith('vmess://'):
-                outbounds.append(parse_vmess(line))
+                outbound = parse_vmess(line)
             elif line.startswith('hysteria2://'):
-                outbounds.append(parse_hysteria2_for_xray(line))
+                outbound = parse_hysteria2_for_xray(line)
                 print(f"✅ Hysteria2 добавлен: {tag}")
             else:
-                continue  # Неизвестный протокол
-            tags.append(outbounds[-1]['tag'])
+                continue
+            
+            # 🔑 Делаем тег уникальным
+            outbound["tag"] = make_unique_tag(outbound["tag"], used_tags)
+            outbounds.append(outbound)
+            tags.append(outbound["tag"])
+            
         except Exception as e:
             print(f"⚠️ Ошибка парсинга [{tag}]: {e}")
     
@@ -292,13 +288,11 @@ def main():
     
     # 🛡️ Сборка финального конфига
     config = {
-        # 🔍 Высокий уровень логирования
         "log": {
             "loglevel": "debug",
             "access": "access.log",
             "error": "error.log"
         },
-        # 📥 Inbounds (локальные порты)
         "inbounds": [
             {
                 "tag": "socks-inbound",
@@ -321,21 +315,14 @@ def main():
                 "settings": {"allowTransparent": False}
             }
         ],
-        # 📤 Outbounds (прокси-серверы)
         "outbounds": outbounds,
-        # 🧭 Маршрутизация
         "routing": {
-            "domainStrategy": "UseIPv4",  # 🔒 Принудительно только IPv4
+            "domainStrategy": "UseIPv4",
             "rules": [
-                # 🔥 Блокировка ВСЕХ IPv6-адресов (::/0)
                 {"type": "field", "ip": ["::/0"], "outboundTag": "block"},
-                # Блокировка приватных сетей
                 {"type": "field", "ip": ["geoip:private"], "outboundTag": "block"},
-                # Блокировка рекламы
                 {"type": "field", "domain": ["geosite:category-ads-all"], "outboundTag": "block"},
-                # Локальные домены — напрямую
                 {"type": "field", "domain": ["domain:local", r"regexp:\.local$"], "outboundTag": "direct"},
-                # Весь остальной трафик — через балансировщик
                 {"type": "field", "inboundTag": ["socks-inbound", "http-inbound"], "balancerTag": "auto-balancer"}
             ],
             "balancers": [{
@@ -344,7 +331,6 @@ def main():
                 "strategy": {"type": "random"}
             }]
         },
-        # ⚙️ Политика соединений
         "policy": {
             "levels": {
                 "0": {
@@ -358,7 +344,6 @@ def main():
         }
     }
     
-    # Создаём директории для выходного файла, если нужно
     out_dir = os.path.dirname(args.output)
     if out_dir and not os.path.exists(out_dir):
         os.makedirs(out_dir, exist_ok=True)
@@ -366,13 +351,9 @@ def main():
     with open(args.output, 'w', encoding='utf-8') as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
     
-    # Статистика
-    h2_count = sum(1 for o in outbounds if o.get('protocol') == 'hysteria')
     print(f"\n✅ Конфиг создан: {args.output}")
     print(f"📊 Всего узлов: {len(tags)}")
-    print(f"   ├─ Hysteria2: {h2_count}")
-    print(f"   ├─ Trojan/VLESS/VMess: {len(tags) - h2_count}")
-    print(f"   └─ Пропущено: CN + Shadowsocks")
+    print(f"   └─ Уникальных тегов: {len(set(tags))}")
 
 
 if __name__ == "__main__":
