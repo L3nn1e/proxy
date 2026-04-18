@@ -5,6 +5,7 @@ import base64
 import urllib.parse
 import os
 import sys
+import argparse
 
 def get_tag(url):
     """Извлекает и декодирует название узла из URL."""
@@ -110,11 +111,18 @@ def parse_hysteria2(url):
     }
 
 def main():
-    input_file = "xeovo-any-URL_List_All_Protocols(2).txt"
-    output_file = "xray_config.json"
+    parser = argparse.ArgumentParser(description="Конвертация подписки Xeovo в конфиг Xray")
+    parser.add_argument("-i", "--input", default="xeovo-any-URL_List_All_Protocols(2).txt", 
+                        help="Путь к входному файлу подписки (txt)")
+    parser.add_argument("-o", "--output", default="xray_config.json", 
+                        help="Путь к выходному файлу конфига (json)")
+    args = parser.parse_args()
+
+    input_file = args.input
+    output_file = args.output
 
     if not os.path.exists(input_file):
-        print(f"❌ Ошибка: файл {input_file} не найден в текущей директории.")
+        print(f"❌ Ошибка: файл {input_file} не найден.")
         sys.exit(1)
 
     with open(input_file, 'r', encoding='utf-8') as f:
@@ -172,7 +180,7 @@ def main():
         "routing": {
             "domainStrategy": "UseIPv4",
             "rules": [
-                # 4. Жёсткая блокировка всех IPv6 адресов
+                # Жёсткая блокировка всех IPv6 адресов
                 {"type": "field", "ip": ["::/0"], "outboundTag": "block"},
                 # Блокировка приватных сетей и рекламы
                 {"type": "field", "ip": ["geoip:private"], "outboundTag": "block"},
@@ -185,6 +193,11 @@ def main():
         },
         "policy": {"levels": {"0": {"handshake": 4, "connIdle": 300, "uplinkOnly": 2, "downlinkOnly": 4, "bufferSize": 1024}}}
     }
+
+    # Создаём директории для output, если их нет
+    out_dir = os.path.dirname(output_file)
+    if out_dir and not os.path.exists(out_dir):
+        os.makedirs(out_dir, exist_ok=True)
 
     with open(output_file, 'w', encoding='utf-8') as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
