@@ -1,17 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import json
-import base64
-import urllib.parse
-import os
-import sys
-import argparse
+import json, base64, urllib.parse, os, sys, argparse, re
 
 def get_tag(url):
-    """Извлекает и декодирует название узла из URL."""
-    if '#' in url:
-        return urllib.parse.unquote(url.split('#')[-1])
-    return "unknown_node"
+    return urllib.parse.unquote(url.split('#')[-1]) if '#' in url else "unknown_node"
 
 def parse_trojan(url):
     tag = get_tag(url)
@@ -23,16 +15,10 @@ def parse_trojan(url):
     sni = query.get('sni', host)
     ws_path = query.get('path', '/')
     ws_host = query.get('host', host)
-
     out = {
-        "tag": tag,
-        "protocol": "trojan",
+        "tag": tag, "protocol": "trojan",
         "settings": {"servers": [{"address": host, "port": port, "password": password}]},
-        "streamSettings": {
-            "network": net,
-            "security": "tls",
-            "tlsSettings": {"serverName": sni, "fingerprint": "chrome"}
-        }
+        "streamSettings": {"network": net, "security": "tls", "tlsSettings": {"serverName": sni, "fingerprint": "chrome"}}
     }
     if net == 'ws':
         out["streamSettings"]["wsSettings"] = {"path": ws_path, "headers": {"Host": ws_host}}
@@ -49,10 +35,8 @@ def parse_vless(url):
     ws_path = query.get('path', parsed.path.lstrip('/'))
     ws_host = query.get('host', host)
     security = query.get('security', 'tls')
-
     out = {
-        "tag": tag,
-        "protocol": "vless",
+        "tag": tag, "protocol": "vless",
         "settings": {"vnext": [{"address": host, "port": port, "users": [{"id": uuid, "encryption": "none"}]}]},
         "streamSettings": {"network": net, "security": security}
     }
@@ -67,21 +51,16 @@ def parse_vmess(url):
     b64 = url.split('://')[1].strip()
     b64 += '=' * (4 - len(b64) % 4) if len(b64) % 4 != 0 else ''
     data = json.loads(base64.b64decode(b64).decode('utf-8'))
-    
     host, port = data['add'], int(data['port'])
     net, tls = data.get('net', 'tcp'), data.get('tls', 'none')
     sni = data.get('sni', host)
     ws_path = data.get('path', '/')
     ws_host = data.get('host', host)
-
     out = {
-        "tag": tag,
-        "protocol": "vmess",
-        "settings": {
-            "vnext": [{"address": host, "port": port, "users": [
-                {"id": data['id'], "alterId": int(data.get('aid', 0)), "security": data.get('scy', 'auto')}
-            ]}]
-        },
+        "tag": tag, "protocol": "vmess",
+        "settings": {"vnext": [{"address": host, "port": port, "users": [
+            {"id": data['id'], "alterId": int(data.get('aid', 0)), "security": data.get('scy', 'auto')}
+        ]}]},
         "streamSettings": {"network": net, "security": tls}
     }
     if tls == 'tls':
@@ -90,62 +69,71 @@ def parse_vmess(url):
         out["streamSettings"]["wsSettings"] = {"path": ws_path, "headers": {"Host": ws_host}}
     return out
 
-def parse_hysteria2(url):
+def parse_hysteria2_for_xray(url):
+    """Парсит hysteria2:// для Xray-core (protocol: hysteria, version: 2)"""
     tag = get_tag(url)
     parsed = urllib.parse.urlparse(url.split('#')[0])
     host, port = parsed.hostname, parsed.port
-    password = urllib.parse.unquote(parsed.username)
+    auth = urllib.parse.unquote(parsed.username or '')
     query = dict(urllib.parse.parse_qsl(parsed.query))
     sni = query.get('sni', host)
-
-    return {
+    obfs = query.get('obfs', '')
+    obfs_password = query.get('obfs-password', '')
+    
+    out = {
         "tag": tag,
-        "protocol": "hysteria2",
-        "settings": {"servers": [{"address": host, "port": port, "password": password}]},
+        "protocol": "hysteria",  # Важно: НЕ "hysteria2"
+        "settings": {
+            "version": 2,  # Важно: указываем версию 2
+            "address": host,
+            "port": port,
+            "auth": auth
+        },
         "streamSettings": {
-            "network": "hysteria2",
+            "network": "hysteria",
             "security": "tls",
-            "tlsSettings": {"serverName": sni, "fingerprint": "chrome"},
-            "hysteria2Settings": {"up_mbps": 100, "down_mbps": 100}
+            "tlsSettings": {"serverName": sni, "fingerprint": "chrome", "alpn": ["h3"]},
+            "hysteriaSettings": {
+                "version": 2,
+                "auth": auth,
+                "up": "100 mbps",
+                "down": "100 mbps"
+            }
         }
     }
+    # Поддержка Salamander obfs через finalmask (правильный формат для Xray) [[10]]
+    if obfs == 'salamander' and obfs_password:
+        out["streamSettings"]["finalmask"] = {
+            "udp": [{"type": "salamander", "settings": {"password": obfs_password}}]
+        }
+    return out
 
 def main():
-    parser = argparse.ArgumentParser(description="Конвертация подписки Xeovo в конфиг Xray")
-    parser.add_argument("-i", "--input", default="xeovo-any-URL_List_All_Protocols(2).txt", 
-                        help="Путь к входному файлу подписки (txt)")
-    parser.add_argument("-o", "--output", default="xray_config.json", 
-                        help="Путь к выходному файлу конфига (json)")
+    parser = argparse.ArgumentParser(description="Xeovo → Xray config converter")
+    parser.add_argument("-i", "--input", default="xeovo-any-URL_List_All_Protocols(2).txt")
+    parser.add_argument("-o", "--output", default="xray_config.json")
     args = parser.parse_args()
-
-    input_file = args.input
-    output_file = args.output
-
-    if not os.path.exists(input_file):
-        print(f"❌ Ошибка: файл {input_file} не найден.")
-        sys.exit(1)
-
-    with open(input_file, 'r', encoding='utf-8') as f:
+    
+    if not os.path.exists(args.input):
+        print(f"❌ Файл {args.input} не найден"); sys.exit(1)
+    
+    with open(args.input, 'r', encoding='utf-8') as f:
         lines = f.readlines()
-
+    
     outbounds, tags = [], []
-
+    
     for line in lines:
         line = line.strip()
         if not line: continue
-
         tag = get_tag(line).lower()
         host = (urllib.parse.urlparse(line).hostname or "").lower()
-
-        # 1. Пропуск заблокированных CN-серверов
+        
+        # Фильтры
         if 'cn' in tag or 'cn' in host:
-            print(f"⏭️ Пропущен CN-узел: {line}")
-            continue
-
-        # 2. Пропуск протокола Shadowsocks
+            print(f"⏭️ Пропущен CN: {line}"); continue
         if line.startswith('ss://'):
-            continue
-
+            continue  # Shadowsocks
+        
         try:
             if line.startswith('trojan://'):
                 outbounds.append(parse_trojan(line))
@@ -154,56 +142,52 @@ def main():
             elif line.startswith('vmess://'):
                 outbounds.append(parse_vmess(line))
             elif line.startswith('hysteria2://'):
-                outbounds.append(parse_hysteria2(line))
+                # Теперь поддерживаем Hysteria2 для Xray-core
+                outbounds.append(parse_hysteria2_for_xray(line))
+                print(f"✅ Hysteria2 добавлен: {get_tag(line)}")
             else:
                 continue
-            
             tags.append(outbounds[-1]['tag'])
         except Exception as e:
-            print(f"⚠️ Ошибка парсинга строки: {e}")
-
-    # Добавляем системные outbounds
-    outbounds.append({"tag": "direct", "protocol": "freedom", "settings": {}, "streamSettings": {"sockopt": {"domainStrategy": "UseIPv4"}}})
+            print(f"⚠️ Ошибка парсинга: {e}")
+    
+    # Системные outbounds
+    outbounds.append({"tag": "direct", "protocol": "freedom", "settings": {}, 
+                      "streamSettings": {"sockopt": {"domainStrategy": "UseIPv4", "tcpFastOpen": True}}})
     outbounds.append({"tag": "block", "protocol": "blackhole", "settings": {"response": {"type": "http"}}})
-
-    # Сборка конфига: высокий лог, предотвращение IPv6 утечек (DNS удалён)
+    
     config = {
         "log": {"loglevel": "debug", "access": "access.log", "error": "error.log"},
         "inbounds": [
-            {"tag": "socks-inbound", "port": 20808, "protocol": "socks", 
+            {"tag": "socks-inbound", "port": 20808, "protocol": "socks",
              "settings": {"auth": "noauth", "udp": True, "ip": "127.0.0.1"},
-             "sniffing": {"enabled": True, "destOverride": ["http", "tls"]}},
-            {"tag": "http-inbound", "port": 20809, "protocol": "http", 
-             "settings": {"allowTransparent": False}}
+             "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"]}},
+            {"tag": "http-inbound", "port": 20809, "protocol": "http", "settings": {"allowTransparent": False}}
         ],
         "outbounds": outbounds,
         "routing": {
             "domainStrategy": "UseIPv4",
             "rules": [
-                # Жёсткая блокировка всех IPv6 адресов
-                {"type": "field", "ip": ["::/0"], "outboundTag": "block"},
-                # Блокировка приватных сетей и рекламы
+                {"type": "field", "ip": ["::/0"], "outboundTag": "block"},  # Блок всех IPv6
                 {"type": "field", "ip": ["geoip:private"], "outboundTag": "block"},
                 {"type": "field", "domain": ["geosite:category-ads-all"], "outboundTag": "block"},
-                {"type": "field", "domain": ["domain:local", "regexp:\.local$"], "outboundTag": "direct"},
-                # Балансировщик для входящих соединений
+                {"type": "field", "domain": ["domain:local", "regexp:\\.local$"], "outboundTag": "direct"},
                 {"type": "field", "inboundTag": ["socks-inbound", "http-inbound"], "balancerTag": "auto-balancer"}
             ],
             "balancers": [{"tag": "auto-balancer", "selector": tags, "strategy": {"type": "random"}}]
         },
         "policy": {"levels": {"0": {"handshake": 4, "connIdle": 300, "uplinkOnly": 2, "downlinkOnly": 4, "bufferSize": 1024}}}
     }
-
-    # Создаём директории для output, если их нет
-    out_dir = os.path.dirname(output_file)
+    
+    out_dir = os.path.dirname(args.output)
     if out_dir and not os.path.exists(out_dir):
         os.makedirs(out_dir, exist_ok=True)
-
-    with open(output_file, 'w', encoding='utf-8') as f:
+    
+    with open(args.output, 'w', encoding='utf-8') as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
     
-    print(f"\n✅ Конфиг успешно создан: {output_file}")
-    print(f"📊 Обработано узлов: {len(tags)} (Shadowsocks и CN-серверы исключены)")
+    print(f"\n✅ Конфиг создан: {args.output}")
+    print(f"📊 Узлов: {len(tags)} | Hysteria2: {sum(1 for o in outbounds if o.get('protocol')=='hysteria')}")
 
 if __name__ == "__main__":
     main()
