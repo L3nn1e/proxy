@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Конвертер подписки Xeovo в конфиг Xray-core
-Поддерживает: hysteria2, trojan, vless, vmess
-Фильтрует: CN-серверы, shadowsocks
-Безопасность: блокировка IPv6, UseIPv4, debug-лог
+Xeovo Subscription to Xray Config Converter
+Версия: 1.4 (Journald, Unique Tags, Hysteria2 Fix)
 """
 import json
 import base64
@@ -13,16 +11,14 @@ import os
 import sys
 import argparse
 
-
 def get_tag(url: str) -> str:
-    """Извлекает и декодирует название узла из фрагмента URL."""
+    """Извлекает название узла из URL."""
     if '#' in url:
         return urllib.parse.unquote(url.split('#')[-1])
     return "unknown_node"
 
-
 def make_unique_tag(base_tag: str, used_tags: set) -> str:
-    """Делает тег уникальным, добавляя суффикс при дубликатах."""
+    """Генерирует уникальный тег, добавляя суффикс при совпадении."""
     if base_tag not in used_tags:
         used_tags.add(base_tag)
         return base_tag
@@ -33,9 +29,8 @@ def make_unique_tag(base_tag: str, used_tags: set) -> str:
     used_tags.add(unique_tag)
     return unique_tag
 
-
 def parse_trojan(url: str) -> dict:
-    """Парсит trojan:// ссылку в формат Xray outbound."""
+    """Парсит trojan:// ссылку."""
     tag = get_tag(url)
     parsed = urllib.parse.urlparse(url.split('#')[0])
     host = parsed.hostname
@@ -49,34 +44,23 @@ def parse_trojan(url: str) -> dict:
     ws_host = query.get('host', host)
     
     out = {
-        "tag": tag,  # Будет заменён на уникальный в main()
+        "tag": tag,
         "protocol": "trojan",
         "settings": {
-            "servers": [{
-                "address": host,
-                "port": port,
-                "password": password
-            }]
+            "servers": [{"address": host, "port": port, "password": password}]
         },
         "streamSettings": {
             "network": net,
             "security": "tls",
-            "tlsSettings": {
-                "serverName": sni,
-                "fingerprint": "chrome"
-            }
+            "tlsSettings": {"serverName": sni, "fingerprint": "chrome"}
         }
     }
     if net == 'ws':
-        out["streamSettings"]["wsSettings"] = {
-            "path": ws_path,
-            "headers": {"Host": ws_host}
-        }
+        out["streamSettings"]["wsSettings"] = {"path": ws_path, "headers": {"Host": ws_host}}
     return out
 
-
 def parse_vless(url: str) -> dict:
-    """Парсит vless:// ссылку в формат Xray outbound."""
+    """Парсит vless:// ссылку."""
     tag = get_tag(url)
     parsed = urllib.parse.urlparse(url.split('#')[0])
     host = parsed.hostname
@@ -94,40 +78,26 @@ def parse_vless(url: str) -> dict:
         "tag": tag,
         "protocol": "vless",
         "settings": {
-            "vnext": [{
-                "address": host,
-                "port": port,
-                "users": [{
-                    "id": uuid,
-                    "encryption": "none"
-                }]
-            }]
+            "vnext": [{"address": host, "port": port, "users": [{"id": uuid, "encryption": "none"}]}]
         },
-        "streamSettings": {
-            "network": net,
-            "security": security
-        }
+        "streamSettings": {"network": net, "security": security}
     }
     if security == 'tls':
-        out["streamSettings"]["tlsSettings"] = {
-            "serverName": sni,
-            "fingerprint": "chrome"
-        }
+        out["streamSettings"]["tlsSettings"] = {"serverName": sni, "fingerprint": "chrome"}
     if net == 'ws':
-        out["streamSettings"]["wsSettings"] = {
-            "path": ws_path,
-            "headers": {"Host": ws_host}
-        }
+        out["streamSettings"]["wsSettings"] = {"path": ws_path, "headers": {"Host": ws_host}}
     return out
 
-
 def parse_vmess(url: str) -> dict:
-    """Парсит vmess:// (base64 JSON) ссылку в формат Xray outbound."""
+    """Парсит vmess:// ссылку."""
     tag = get_tag(url)
     b64 = url.split('://')[1].strip()
     b64 += '=' * (4 - len(b64) % 4) if len(b64) % 4 != 0 else ''
-    
-    data = json.loads(base64.b64decode(b64).decode('utf-8'))
+    try:
+        data = json.loads(base64.b64decode(b64).decode('utf-8'))
+    except Exception:
+        return None
+        
     host = data['add']
     port = int(data['port'])
     net = data.get('net', 'tcp')
@@ -140,36 +110,20 @@ def parse_vmess(url: str) -> dict:
         "tag": tag,
         "protocol": "vmess",
         "settings": {
-            "vnext": [{
-                "address": host,
-                "port": port,
-                "users": [{
-                    "id": data['id'],
-                    "alterId": int(data.get('aid', 0)),
-                    "security": data.get('scy', 'auto')
-                }]
-            }]
+            "vnext": [{"address": host, "port": port, "users": [
+                {"id": data['id'], "alterId": int(data.get('aid', 0)), "security": data.get('scy', 'auto')}
+            ]}]
         },
-        "streamSettings": {
-            "network": net,
-            "security": tls
-        }
+        "streamSettings": {"network": net, "security": tls}
     }
     if tls == 'tls':
-        out["streamSettings"]["tlsSettings"] = {
-            "serverName": sni,
-            "fingerprint": "chrome"
-        }
+        out["streamSettings"]["tlsSettings"] = {"serverName": sni, "fingerprint": "chrome"}
     if net == 'ws':
-        out["streamSettings"]["wsSettings"] = {
-            "path": ws_path,
-            "headers": {"Host": ws_host}
-        }
+        out["streamSettings"]["wsSettings"] = {"path": ws_path, "headers": {"Host": ws_host}}
     return out
 
-
 def parse_hysteria2_for_xray(url: str) -> dict:
-    """Парсит hysteria2:// ссылку в формат Xray-core outbound."""
+    """Парсит hysteria2:// ссылку для Xray-core."""
     tag = get_tag(url)
     parsed = urllib.parse.urlparse(url.split('#')[0])
     host = parsed.hostname
@@ -180,7 +134,7 @@ def parse_hysteria2_for_xray(url: str) -> dict:
     
     return {
         "tag": tag,
-        "protocol": "hysteria",
+        "protocol": "hysteria",  # Важно: в Xray это "hysteria", а не "hysteria2"
         "settings": {
             "version": 2,
             "address": host,
@@ -203,24 +157,14 @@ def parse_hysteria2_for_xray(url: str) -> dict:
         }
     }
 
-
-def is_cn_node(tag: str, host: str) -> bool:
-    """Проверяет, является ли узел заблокированным CN-сервером."""
-    tag_lower = tag.lower()
-    host_lower = (host or "").lower()
-    cn_patterns = ['cn', '-cn-', 'cn-', 'china', 'custom.li']
-    return any(p in tag_lower or p in host_lower for p in cn_patterns)
-
-
 def main():
-    parser = argparse.ArgumentParser(description="Конвертация подписки Xeovo в конфиг Xray-core")
-    parser.add_argument("-i", "--input", default="xeovo-any-URL_List_All_Protocols(2).txt", help="Входной файл подписки")
-    parser.add_argument("-o", "--output", default="xray_config.json", help="Выходной конфиг Xray")
+    parser = argparse.ArgumentParser(description="Xeovo → Xray config converter")
+    parser.add_argument("-i", "--input", default="xeovo-any-URL_List_All_Protocols(2).txt")
+    parser.add_argument("-o", "--output", default="xray_config.json")
     args = parser.parse_args()
     
     if not os.path.exists(args.input):
-        print(f"❌ Ошибка: файл {args.input} не найден")
-        sys.exit(1)
+        print(f"❌ Файл {args.input} не найден"); sys.exit(1)
     
     with open(args.input, 'r', encoding='utf-8') as f:
         lines = f.readlines()
@@ -229,19 +173,17 @@ def main():
     
     for line in lines:
         line = line.strip()
-        if not line:
-            continue
+        if not line: continue
         
         tag = get_tag(line)
         parsed = urllib.parse.urlparse(line)
         host = parsed.hostname or ""
         
-        # 🔴 Фильтр 1: Пропуск заблокированных CN-серверов
-        if is_cn_node(tag, host):
-            print(f"⏭️ Пропущен CN-узел: {tag}")
+        # Фильтр CN (заблокированные серверы)
+        if 'cn' in tag.lower() or 'cn' in host.lower():
             continue
         
-        # 🔴 Фильтр 2: Пропуск Shadowsocks
+        # Фильтр Shadowsocks
         if line.startswith('ss://'):
             continue
         
@@ -254,66 +196,42 @@ def main():
                 outbound = parse_vmess(line)
             elif line.startswith('hysteria2://'):
                 outbound = parse_hysteria2_for_xray(line)
-                print(f"✅ Hysteria2 добавлен: {tag}")
             else:
                 continue
             
-            # 🔑 Делаем тег уникальным
-            outbound["tag"] = make_unique_tag(outbound["tag"], used_tags)
-            outbounds.append(outbound)
-            tags.append(outbound["tag"])
+            if outbound:
+                # Генерируем уникальный тег
+                outbound["tag"] = make_unique_tag(outbound["tag"], used_tags)
+                outbounds.append(outbound)
+                tags.append(outbound["tag"])
             
         except Exception as e:
             print(f"⚠️ Ошибка парсинга [{tag}]: {e}")
     
-    # Системные outbounds: direct и block
+    # Системные outbounds
     outbounds.append({
         "tag": "direct",
         "protocol": "freedom",
         "settings": {},
-        "streamSettings": {
-            "sockopt": {
-                "domainStrategy": "UseIPv4",
-                "tcpFastOpen": True
-            }
-        }
+        "streamSettings": {"sockopt": {"domainStrategy": "UseIPv4", "tcpFastOpen": True}}
     })
     outbounds.append({
         "tag": "block",
         "protocol": "blackhole",
-        "settings": {
-            "response": {"type": "http"}
-        }
+        "settings": {"response": {"type": "http"}}
     })
     
-    # 🛡️ Сборка финального конфига
+    # ⚙️ Сборка конфига
     config = {
-        "log": {
-            "loglevel": "debug",
-            "access": "access.log",
-            "error": "error.log"
-        },
+        # 📝 LOG: Пустые строки направляют логи в stdout.
+        # При запуске через systemd логи автоматически попадут в journald.
+        "log": {"loglevel": "debug", "access": "", "error": ""},
+        
         "inbounds": [
-            {
-                "tag": "socks-inbound",
-                "port": 20808,
-                "protocol": "socks",
-                "settings": {
-                    "auth": "noauth",
-                    "udp": True,
-                    "ip": "127.0.0.1"
-                },
-                "sniffing": {
-                    "enabled": True,
-                    "destOverride": ["http", "tls", "quic"]
-                }
-            },
-            {
-                "tag": "http-inbound",
-                "port": 20809,
-                "protocol": "http",
-                "settings": {"allowTransparent": False}
-            }
+            {"tag": "socks-inbound", "port": 20808, "protocol": "socks",
+             "settings": {"auth": "noauth", "udp": True, "ip": "127.0.0.1"},
+             "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"]}},
+            {"tag": "http-inbound", "port": 20809, "protocol": "http", "settings": {"allowTransparent": False}}
         ],
         "outbounds": outbounds,
         "routing": {
@@ -322,26 +240,12 @@ def main():
                 {"type": "field", "ip": ["::/0"], "outboundTag": "block"},
                 {"type": "field", "ip": ["geoip:private"], "outboundTag": "block"},
                 {"type": "field", "domain": ["geosite:category-ads-all"], "outboundTag": "block"},
-                {"type": "field", "domain": ["domain:local", r"regexp:\.local$"], "outboundTag": "direct"},
+                {"type": "field", "domain": ["domain:local", "regexp:\\.local$"], "outboundTag": "direct"},
                 {"type": "field", "inboundTag": ["socks-inbound", "http-inbound"], "balancerTag": "auto-balancer"}
             ],
-            "balancers": [{
-                "tag": "auto-balancer",
-                "selector": tags,
-                "strategy": {"type": "random"}
-            }]
+            "balancers": [{"tag": "auto-balancer", "selector": tags, "strategy": {"type": "random"}}]
         },
-        "policy": {
-            "levels": {
-                "0": {
-                    "handshake": 4,
-                    "connIdle": 300,
-                    "uplinkOnly": 2,
-                    "downlinkOnly": 4,
-                    "bufferSize": 1024
-                }
-            }
-        }
+        "policy": {"levels": {"0": {"handshake": 4, "connIdle": 300, "uplinkOnly": 2, "downlinkOnly": 4, "bufferSize": 1024}}}
     }
     
     out_dir = os.path.dirname(args.output)
@@ -352,9 +256,8 @@ def main():
         json.dump(config, f, indent=2, ensure_ascii=False)
     
     print(f"\n✅ Конфиг создан: {args.output}")
-    print(f"📊 Всего узлов: {len(tags)}")
-    print(f"   └─ Уникальных тегов: {len(set(tags))}")
-
+    print(f"📊 Узлов: {len(tags)}")
+    print(f"💡 Логи выводятся в stdout (для просмотра: journalctl -u xray)")
 
 if __name__ == "__main__":
     main()
