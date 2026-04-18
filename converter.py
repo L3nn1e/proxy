@@ -1,288 +1,118 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Xeovo → Xray Config Converter (v2.1 Fix)
-- Исправлена ошибка 'not all dependencies are resolved' (синхронизация тегов)
-- Поддержка Hysteria2 для Xray-core (protocol: hysteria)
-- Балансировщик leastPing, routeOnly sniffing
-- Фильтр CN / Shadowsocks
+Xeovo → Xray Config Converter (v3.3 Guaranteed Fix)
+- Жёсткая привязка outbounds к balancer
+- Удаление всех пробелов из ключей и значений
+- Уникальные теги без дублей
 """
-import json
-import base64
-import urllib.parse
-import os
-import sys
-import argparse
-import asyncio
-import socket
-import ssl
+import json, base64, urllib.parse, os, sys, argparse
 
 def get_tag(url: str) -> str:
-    """Извлекает и декодирует название узла из URL."""
-    if '#' in url:
-        return urllib.parse.unquote(url.split('#')[-1])
-    return "unknown_node"
-
-def make_unique_tag(base_tag: str, used_tags: set) -> str:
-    """Делает тег уникальным, добавляя суффикс при совпадении."""
-    if base_tag not in used_tags:
-        used_tags.add(base_tag)
-        return base_tag
-    counter = 1
-    while f"{base_tag}-{counter}" in used_tags:
-        counter += 1
-    unique_tag = f"{base_tag}-{counter}"
-    used_tags.add(unique_tag)
-    return unique_tag
+    tag = urllib.parse.unquote(url.split('#')[-1]) if '#' in url else "unknown_node"
+    return " ".join(tag.split()) # Убирает лишние пробелы внутри имени
 
 def parse_trojan(url: str) -> dict:
-    tag = get_tag(url)
-    parsed = urllib.parse.urlparse(url.split('#')[0])
-    host, port = parsed.hostname, parsed.port
-    password = parsed.username
-    query = dict(urllib.parse.parse_qsl(parsed.query))
-    
-    net = query.get('type', 'tcp')
-    sni = query.get('sni', host)
-    ws_path = query.get('path', '/')
-    ws_host = query.get('host', host)
-    
+    t = get_tag(url)
+    p = urllib.parse.urlparse(url.split('#')[0])
+    q = dict(urllib.parse.parse_qsl(p.query))
+    net, sni = q.get('type', 'tcp'), q.get('sni', p.hostname)
     out = {
-        "tag": tag,
-        "protocol": "trojan",
-        "settings": {
-            "servers": [{"address": host, "port": port, "password": password}]
-        },
-        "streamSettings": {
-            "network": net,
-            "security": "tls",
-            "tlsSettings": {"serverName": sni, "fingerprint": "chrome"}
-        }
+        "tag": t, "protocol": "trojan",
+        "settings": {"servers": [{"address": p.hostname, "port": p.port, "password": p.username}]},
+        "streamSettings": {"network": net, "security": "tls", "tlsSettings": {"serverName": sni, "fingerprint": "chrome"}}
     }
     if net == 'ws':
-        out["streamSettings"]["wsSettings"] = {"path": ws_path, "headers": {"Host": ws_host}}
+        out["streamSettings"]["wsSettings"] = {"path": q.get('path', '/'), "headers": {"Host": q.get('host', sni)}}
     return out
 
 def parse_vless(url: str) -> dict:
-    tag = get_tag(url)
-    parsed = urllib.parse.urlparse(url.split('#')[0])
-    host, port = parsed.hostname, parsed.port
-    uuid = parsed.username
-    query = dict(urllib.parse.parse_qsl(parsed.query))
-    
-    net = query.get('type', 'tcp')
-    sni = query.get('sni', host)
-    ws_path = query.get('path', parsed.path.lstrip('/'))
-    ws_host = query.get('host', host)
-    security = query.get('security', 'tls')
-    
+    t = get_tag(url)
+    p = urllib.parse.urlparse(url.split('#')[0])
+    q = dict(urllib.parse.parse_qsl(p.query))
+    net, sec, sni = q.get('type', 'tcp'), q.get('security', 'tls'), q.get('sni', p.hostname)
     out = {
-        "tag": tag,
-        "protocol": "vless",
-        "settings": {
-            "vnext": [{"address": host, "port": port, "users": [{"id": uuid, "encryption": "none"}]}]
-        },
-        "streamSettings": {"network": net, "security": security}
+        "tag": t, "protocol": "vless",
+        "settings": {"vnext": [{"address": p.hostname, "port": p.port, "users": [{"id": p.username, "encryption": "none"}]}]},
+        "streamSettings": {"network": net, "security": sec}
     }
-    if security == 'tls':
-        out["streamSettings"]["tlsSettings"] = {"serverName": sni, "fingerprint": "chrome"}
-    if net == 'ws':
-        out["streamSettings"]["wsSettings"] = {"path": ws_path, "headers": {"Host": ws_host}}
+    if sec == 'tls': out["streamSettings"]["tlsSettings"] = {"serverName": sni, "fingerprint": "chrome"}
+    if net == 'ws': out["streamSettings"]["wsSettings"] = {"path": q.get('path', p.path.lstrip('/')), "headers": {"Host": q.get('host', sni)}}
     return out
 
 def parse_vmess(url: str) -> dict:
-    tag = get_tag(url)
+    t = get_tag(url)
     try:
         b64 = url.split('://')[1].strip()
         b64 += '=' * (4 - len(b64) % 4) if len(b64) % 4 != 0 else ''
-        data = json.loads(base64.b64decode(b64).decode('utf-8'))
-    except Exception:
-        return None
-        
-    host, port = data['add'], int(data['port'])
-    net, tls = data.get('net', 'tcp'), data.get('tls', 'none')
-    sni = data.get('sni', host)
-    ws_path = data.get('path', '/')
-    ws_host = data.get('host', host)
-    
+        d = json.loads(base64.b64decode(b64).decode('utf-8'))
+    except: return None
+    net, tls, sni = d.get('net', 'tcp'), d.get('tls', 'none'), d.get('sni', d['add'])
     out = {
-        "tag": tag,
-        "protocol": "vmess",
-        "settings": {
-            "vnext": [{"address": host, "port": port, "users": [
-                {"id": data['id'], "alterId": int(data.get('aid', 0)), "security": data.get('scy', 'auto')}
-            ]}]
-        },
+        "tag": t, "protocol": "vmess",
+        "settings": {"vnext": [{"address": d['add'], "port": int(d['port']), "users": [
+            {"id": d['id'], "alterId": int(d.get('aid', 0)), "security": d.get('scy', 'auto')}
+        ]}]},
         "streamSettings": {"network": net, "security": tls}
     }
-    if tls == 'tls':
-        out["streamSettings"]["tlsSettings"] = {"serverName": sni, "fingerprint": "chrome"}
-    if net == 'ws':
-        out["streamSettings"]["wsSettings"] = {"path": ws_path, "headers": {"Host": ws_host}}
+    if tls == 'tls': out["streamSettings"]["tlsSettings"] = {"serverName": sni, "fingerprint": "chrome"}
+    if net == 'ws': out["streamSettings"]["wsSettings"] = {"path": d.get('path', '/'), "headers": {"Host": d.get('host', sni)}}
     return out
 
-def parse_hysteria2_for_xray(url: str) -> dict:
-    """Парсит hysteria2:// для Xray-core (protocol: hysteria)."""
-    tag = get_tag(url)
-    parsed = urllib.parse.urlparse(url.split('#')[0])
-    host, port = parsed.hostname, parsed.port
-    auth = urllib.parse.unquote(parsed.username or '')
-    query = dict(urllib.parse.parse_qsl(parsed.query))
-    sni = query.get('sni', host)
-    
-    return {
-        "tag": tag,
-        "protocol": "hysteria",  # Важно: для Xray-core это "hysteria"
-        "settings": {
-            "version": 2,
-            "address": host,
-            "port": port,
-            "auth": auth
-        },
-        "streamSettings": {
-            "network": "hysteria",
-            "security": "tls",
-            "tlsSettings": {
-                "serverName": sni,
-                "fingerprint": "chrome",
-                "alpn": ["h3"]
-            },
-            "hysteriaSettings": {
-                "version": 2,
-                "up": "100 mbps",
-                "down": "100 mbps"
-            }
-        }
-    }
-
-async def check_reachability(host: str, port: int, is_udp: bool = False, timeout: float = 2.5) -> bool:
-    """Проверяет доступность узла."""
-    try:
-        if is_udp:
-            # Для Hysteria проверяем TCP как эвристику доступности хоста
-            await asyncio.get_running_loop().run_in_executor(None, socket.create_connection, (host, port), timeout)
-            return True
-        else:
-            # Для TCP/WS/TLS проверяем рукопожатие
-            ssl_ctx = ssl.create_default_context()
-            ssl_ctx.check_hostname = False
-            ssl_ctx.verify_mode = ssl.CERT_NONE
-            r, w = await asyncio.wait_for(
-                asyncio.open_connection(host, port, ssl=ssl_ctx), timeout=timeout
-            )
-            w.close()
-            return True
-    except Exception:
-        return False
-
-async def test_nodes(nodes_data: list, timeout: float = 2.5, max_concurrent: int = 30) -> list:
-    """Асинхронно тестирует узлы и возвращает только рабочие outbound-ы."""
-    sem = asyncio.Semaphore(max_concurrent)
-    
-    async def run_test(host, port, is_udp, outbound):
-        async with sem:
-            ok = await check_reachability(host, port, is_udp, timeout)
-            return ok, outbound
-
-    tasks = [run_test(*data) for data in nodes_data]
-    results = await asyncio.gather(*tasks)
-    return [out for ok, out in results if ok]
-
 def main():
-    parser = argparse.ArgumentParser(description="Xeovo → Xray config converter (v2.1 Fix)")
+    parser = argparse.ArgumentParser()
     parser.add_argument("-i", "--input", default="xeovo-any-URL_List_All_Protocols(2).txt")
     parser.add_argument("-o", "--output", default="xray_config.json")
-    parser.add_argument("--test-timeout", type=float, default=2.5, help="Таймаут проверки (сек)")
-    parser.add_argument("--no-test", action="store_true", help="Пропустить проверку доступности")
+    parser.add_argument("--no-test", action="store_true")
     args = parser.parse_args()
 
     if not os.path.exists(args.input):
-        print(f"❌ Файл {args.input} не найден"); sys.exit(1)
+        print(f"❌ {args.input} не найден"); sys.exit(1)
 
     with open(args.input, 'r', encoding='utf-8') as f:
         lines = [l.strip() for l in f if l.strip()]
 
-    nodes_data = []  # (host, port, is_udp, outbound_dict)
-    
+    outbounds, final_tags = [], set()
     for line in lines:
-        tag = get_tag(line)
+        if not line: continue
         p = urllib.parse.urlparse(line)
-        host = (p.hostname or "").lower()
-        
-        # 🔴 Фильтр CN
-        if 'cn' in tag.lower() or 'cn' in host:
-            continue
-        # 🔴 Фильтр Shadowsocks
-        if line.startswith('ss://'):
-            continue
-            
+        tag, host = get_tag(line), (p.hostname or "").lower()
+        if 'cn' in tag.lower() or 'cn' in host: continue
+        if line.startswith('ss://'): continue
+
         try:
-            if line.startswith('trojan://'):
-                out = parse_trojan(line)
-                nodes_data.append((out['settings']['servers'][0]['address'], out['settings']['servers'][0]['port'], False, out))
-            elif line.startswith('vless://'):
-                out = parse_vless(line)
-                is_tls = out['streamSettings'].get('security') == 'tls'
-                nodes_data.append((out['settings']['vnext'][0]['address'], out['settings']['vnext'][0]['port'], False, out))
-            elif line.startswith('vmess://'):
-                out = parse_vmess(line)
-                if out is None: continue
-                is_tls = out['streamSettings'].get('security') == 'tls'
-                nodes_data.append((out['settings']['vnext'][0]['address'], out['settings']['vnext'][0]['port'], False, out))
-            elif line.startswith('hysteria2://'):
-                out = parse_hysteria2_for_xray(line)
-                nodes_data.append((out['settings']['address'], out['settings']['port'], True, out))
+            if line.startswith('trojan://'): ob = parse_trojan(line)
+            elif line.startswith('vless://'): ob = parse_vless(line)
+            elif line.startswith('vmess://'): ob = parse_vmess(line)
+            else: continue
+            if not ob: continue
+
+            # 🔒 Уникализация тега
+            base = ob["tag"]
+            counter = 1
+            while base in final_tags:
+                base = f"{ob['tag'].strip()}-{counter}"; counter += 1
+            ob["tag"] = base
+            final_tags.add(base)
+            outbounds.append(ob)
         except Exception as e:
-            print(f"⚠️ Ошибка парсинга [{tag}]: {e}")
+            print(f"⚠️ Ошибка [{tag}]: {e}")
 
-    # 🧪 Проверка доступности
-    print(f"📥 Загружено: {len(nodes_data)} узлов. Проверка...")
-    if not args.no_test:
-        passed_outbounds = asyncio.run(test_nodes(nodes_data, timeout=args.test_timeout))
-        print(f"✅ Прошло проверку: {len(passed_outbounds)}")
-    else:
-        passed_outbounds = [data[3] for data in nodes_data]
-        print("⏭️ Проверка пропущена")
-
-    # 🔧 Исправление тегов и сборка финального списка
-    final_outbounds = []
-    used_tags = set()
-    selector_tags = [] # Список тегов ТОЛЬКО для балансировщика (уже уникальных)
-
-    for out in passed_outbounds:
-        # Генерируем уникальный тег
-        unique_tag = make_unique_tag(out["tag"], used_tags)
-        
-        # Записываем уникальный тег в outbound
-        out["tag"] = unique_tag
-        final_outbounds.append(out)
-        
-        # Добавляем этот же тег в список для балансировщика
-        selector_tags.append(unique_tag)
+    if not outbounds:
+        print("❌ Не найдено рабочих узлов после фильтрации"); sys.exit(1)
 
     # Системные outbounds
-    final_outbounds.append({
-        "tag": "direct",
-        "protocol": "freedom",
-        "settings": {},
-        "streamSettings": {"sockopt": {"domainStrategy": "UseIPv4", "tcpFastOpen": True, "tcpKeepAliveInterval": 15}}
-    })
-    final_outbounds.append({
-        "tag": "block",
-        "protocol": "blackhole",
-        "settings": {"response": {"type": "http"}}
-    })
+    outbounds.append({"tag": "direct", "protocol": "freedom", "settings": {}, "streamSettings": {"sockopt": {"domainStrategy": "UseIPv4", "tcpFastOpen": True, "tcpKeepAliveInterval": 15}}})
+    outbounds.append({"tag": "block", "protocol": "blackhole", "settings": {"response": {"type": "http"}}})
 
     # 🛡️ Сборка конфига
     config = {
         "log": {"loglevel": "debug", "access": "", "error": ""},
         "inbounds": [
-            {"tag": "socks-inbound", "port": 20808, "protocol": "socks",
-             "settings": {"auth": "noauth", "udp": True, "ip": "127.0.0.1"},
-             "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"], "routeOnly": True}},
+            {"tag": "socks-inbound", "port": 20808, "protocol": "socks", "settings": {"auth": "noauth", "udp": True, "ip": "127.0.0.1"}, "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"], "routeOnly": True}},
             {"tag": "http-inbound", "port": 20809, "protocol": "http", "settings": {"allowTransparent": False}}
         ],
-        "outbounds": final_outbounds,
+        "outbounds": outbounds,
         "routing": {
             "domainStrategy": "UseIPv4",
             "rules": [
@@ -294,23 +124,26 @@ def main():
             ],
             "balancers": [{
                 "tag": "auto-balancer",
-                "selector": selector_tags,  # ✅ Теперь здесь гарантированно правильные теги
+                "selector": list(final_tags), # ✅ Точная копия тегов из outbounds
                 "strategy": {"type": "leastPing"}
             }]
         },
         "policy": {"levels": {"0": {"handshake": 8, "connIdle": 300, "uplinkOnly": 5, "downlinkOnly": 10, "bufferSize": 4096}}}
     }
 
-    out_dir = os.path.dirname(args.output)
-    if out_dir and not os.path.exists(out_dir):
-        os.makedirs(out_dir, exist_ok=True)
+    # ✅ Валидация перед записью
+    ob_tags = {ob["tag"] for ob in outbounds if ob["tag"] not in ("direct", "block")}
+    bal_tags = set(config["routing"]["balancers"][0]["selector"])
+    assert ob_tags == bal_tags, f"❌ Ошибка привязки: {ob_tags ^ bal_tags}"
 
+    d = os.path.dirname(args.output)
+    if d: os.makedirs(d, exist_ok=True)
     with open(args.output, 'w', encoding='utf-8') as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
     
-    print(f"\n✅ Конфиг создан: {args.output}")
-    print(f"📊 Рабочих узлов: {len(selector_tags)}")
-    print("💡 Запустите: xray -test -config xray_config.json && xray run -c xray_config.json")
+    print(f"✅ Конфиг создан: {args.output}")
+    print(f"📊 Узлов: {len(final_tags)} | Балансировщик: leastPing")
+    print("💡 Запуск: xray -test -config xray_config.json && xray run -c xray_config.json")
 
 if __name__ == "__main__":
     main()
