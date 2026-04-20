@@ -1,0 +1,65 @@
+# Порт для входящих соединений от Squid (HTTP) и SOCKS5 клиентов
+mixed-port: 7890
+allow-lan: false
+mode: rule
+log-level: info
+
+# API для управления (например, для проверки состояния через CLI)
+external-controller: 127.0.0.1:9090
+secret: "password" # Установите свой надежный пароль
+
+# DNS настройки: Режим fake-ip критичен для SOCKS и обхода блокировок
+dns:
+  enable: true
+  ipv6: false
+  enhanced-mode: fake-ip
+  nameserver:
+    - 192.168.1.XX # ВАШ IP PI-HOLE (обязательно укажите его)
+  fake-ip-filter:
+    - "*.lan"
+    - "localhost"
+    - "*.local"
+    - "time.windows.com"
+
+# Провайдер подписки Xeovo
+proxy-providers:
+  xeovo:
+    type: http
+    url: "ВАША_ССЫЛКА_ИЗ_CABINET" # Вставьте ссылку здесь
+    interval: 3600
+    path: ./proxies/xeovo.yaml
+    health-check:
+      enable: true
+      url: http://www.gstatic.com/generate_204
+      interval: 300
+
+# Блокировщик рекламы (Rule-based)
+rule-providers:
+  adblock:
+    type: http
+    behavior: domain
+    url: "https://raw.githubusercontent.com/Loyalsquare/clash-rules/master/adblock.txt"
+    path: ./rules/adblock.yaml
+    interval: 86400
+
+# Группы прокси: автоматический выбор лучшего сервера
+proxy-groups:
+  - name: Best-Server
+    type: url-test
+    use:
+      - xeovo
+    url: http://www.gstatic.com/generate_204
+    interval: 300
+    tolerance: 50
+
+  - name: Global-Proxy
+    type: select
+    proxies:
+      - Best-Server
+      - DIRECT
+
+# Правила маршрутизации
+rules:
+  - RULE-SET,adblock,REJECT # Блокировка рекламы
+  - GEOIP,CN,DIRECT        # Прямой доступ для внутреннего китайского трафика (опционально)
+  - MATCH,Global-Proxy     # Весь остальной трафик через лучший сервер
