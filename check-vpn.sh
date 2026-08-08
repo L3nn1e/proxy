@@ -1,29 +1,31 @@
 #!/usr/bin/env bash
 
 INTERFACE="xeovo-random"
+VPN_SERVICE="awg-quick@xeovo-random.service"
 CHECK_URL="http://api.ipify.org"
-LOG_TAG="vpn-checker"
 
-# Делаем запрос с таймаутом в 5 секунд
-RESPONSE=$(curl -s -m 5 "$CHECK_URL" 2>&1)
-
-# Проверяем на наличие текста блокировки Xeovo или ошибку соединения
-if echo "$RESPONSE" | grep -qE "(BitTorrent is forbidden|access blocked|SSL routines)"; then
-    logger -t "$LOG_TAG" "[WARNING] VPN $INTERFACE is blocked by provider. Rotating IP..."
-    echo "[WARNING] VPN blocked. Rotating $INTERFACE..."
-    
-    # Перезапуск интерфейса AmneziaWG (замените awg-quick на wg-quick, если используете стандартный WireGuard)
-    awg-quick down "$INTERFACE" && sleep 2 && awg-quick up "$INTERFACE"
-    
-    # Перезапуск 3proxy, чтобы он подхватил обновленный сетевой интерфейс
+# 1. Проверяем, запущен ли systemd-юнит и существует ли интерфейс
+if ! systemctl is-active --quiet "$VPN_SERVICE" || ! ip link show "$INTERFACE" >/dev/null 2>&1; then
+    echo "[ERROR] Service $VPN_SERVICE is stopped or interface is down. Restarting via systemd..."
+    systemctl restart "$VPN_SERVICE"
     systemctl restart 3proxy
-    
-    logger -t "$LOG_TAG" "[OK] Interface $INTERFACE restarted."
-elif [[ -z "$RESPONSE" ]]; then
-    logger -t "$LOG_TAG" "[ERROR] No response from $CHECK_URL. Restarting $INTERFACE..."
-    awg-quick down "$INTERFACE" && sleep 2 && awg-quick up "$INTERFACE"
+    exit 0
+fi
+
+# 2. Делаем запрос СТРОГО через VPN-интерфейс
+RESPONSE=$(curl -s -m 5 --interface "$INTERFACE" "$CHECK_URL" 2>&1)
+
+# 3. Проверяем на бан от Xeovo или SSL-ошибку
+if echo "$RESPONSE" | grep -qE "(BitTorrent is forbidden|access blocked|SSL routines)"; then
+    echo "[WARNING] VPN blocked by Xeovo. Rotating IP via systemd restart..."
+    systemctl restart "$VPN_SERVICE"
+    systemctl restart 3proxy
+
+# 4. Проверяем таймаут или отсутствие связи
+elif [[ -z "$RESPONSE" ]] || echo "$RESPONSE" | grep -qE "(Could not resolve|Failed to connect)"; then
+    echo "[ERROR] No connectivity via $INTERFACE. Restarting via systemd..."
+    systemctl restart "$VPN_SERVICE"
     systemctl restart 3proxy
 else
-    # Всё работает штатно
     echo "[OK] VPN is working fine. Public IP: $RESPONSE"
 fi
